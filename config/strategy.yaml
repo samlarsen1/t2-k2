@@ -1,0 +1,53 @@
+# T2-K2 strategy: when a holding counts as overbought, and how much of it to harvest.
+# Unknown keys are rejected, so a typo fails loudly instead of silently using a default.
+
+# --- Overbought detection -------------------------------------------------------------------
+# Computed from ~1 year of daily closes from Yahoo Finance. Set a threshold to null to disable
+# that signal. A holding is overbought when at least `min_signals` enabled signals fire.
+overbought:
+  # Wilder RSI over this many sessions
+  rsi_period: 14
+  # Signal fires when RSI is at or above this
+  rsi_min: 70.0
+  # Simple moving average used for the stretch signal
+  sma_period: 50
+  # Signal fires when the latest close is at least this % above the SMA
+  min_pct_above_sma: 15.0
+  # Short-term run-up: % change over the last `run_up_days` sessions
+  run_up_days: 20
+  # Signal fires when the run-up is at least this %
+  min_run_up_pct: 20.0
+  # How many of the enabled signals above must fire
+  min_signals: 2
+
+# --- Harvesting ------------------------------------------------------------------------------
+harvest:
+  # Only harvest positions whose price is at least this % above the average price paid
+  min_gain_pct: 25.0
+  # Sell this share of the unrealised gain. 1.0 sells exactly the profit and leaves the original
+  # cost invested; 0.5 takes half the profit off the table.
+  gain_fraction: 0.5
+  # Never sell more than this % of a position in one run
+  max_position_sell_pct: 25.0
+  # Skip orders worth less than this, in the account currency
+  min_order_value: 50.0
+  # limit | market
+  order_type: limit
+  # Limit price = Trading212 current price x (1 + limit_offset_pct / 100). Negative sells
+  # slightly below the current price to make a fill more likely.
+  limit_offset_pct: -0.25
+  # DAY | GOOD_TILL_CANCEL
+  time_validity: DAY
+  # Share quantities are rounded down to this many decimal places
+  quantity_decimals: 2
+
+# --- Safety ----------------------------------------------------------------------------------
+# Maximum sell orders placed in a single run (biggest gains first)
+max_orders_per_run: 3
+# Trading212 tickers never to sell, e.g. core long-term holdings
+exclude_tickers: []
+#  - VWRPl_EQ
+
+# Trading212 ticker -> Yahoo Finance symbol, for tickers the automatic mapping gets wrong
+yahoo_symbols: {}
+#  BRK_B_US_EQ: BRK-B
