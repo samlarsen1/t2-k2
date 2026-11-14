@@ -60,9 +60,35 @@ PENDING_SELL = {
     "filledQuantity": 0,
     "limitPrice": 170.0,
     "timeValidity": "DAY",
+    "initiatedFrom": "WEB",
     "createdAt": "2026-11-13T09:01:00.000Z",
     "instrument": {"ticker": "NVDA_US_EQ", "name": "NVIDIA", "currency": "USD"},
 }
+
+
+def api_sell(
+    order_id: int,
+    ticker: str,
+    created_at: str,
+    *,
+    initiated_from: str = "API",
+    status: str = "NEW",
+    order_type: str = "LIMIT",
+) -> dict[str, Any]:
+    """A pending sell order as ``GET /api/v0/equity/orders`` returns it."""
+    return {
+        "id": order_id,
+        "type": order_type,
+        "status": status,
+        "side": "SELL",
+        "quantity": -1.5,
+        "filledQuantity": 0,
+        "limitPrice": 160.0,
+        "timeValidity": "GOOD_TILL_CANCEL",
+        "initiatedFrom": initiated_from,
+        "createdAt": created_at,
+        "instrument": {"ticker": ticker, "currency": "USD"},
+    }
 
 PLACED_ORDER = {
     "id": 4502,
@@ -72,7 +98,8 @@ PLACED_ORDER = {
     "quantity": -1.5,
     "limitPrice": 159.6,
     "timeValidity": "DAY",
-    "creationTime": "2026-11-14T09:00:00.000Z",
+    "initiatedFrom": "API",
+    "createdAt": "2026-11-14T09:00:00.000Z",
 }
 
 

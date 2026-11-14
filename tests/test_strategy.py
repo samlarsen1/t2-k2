@@ -39,6 +39,9 @@ def test_repo_strategy_file_is_valid() -> None:
     strategy = load_strategy(REPO_STRATEGY)
     assert strategy.overbought.min_signals == 2
     assert strategy.harvest.order_type == "limit"
+    assert strategy.harvest.limit_offset_pct == 0.0
+    assert strategy.harvest.time_validity == "GOOD_TILL_CANCEL"
+    assert strategy.harvest.order_expiry_days == 7
 
 
 def test_load_rejects_unknown_keys(tmp_path: Path) -> None:

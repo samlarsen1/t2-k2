@@ -1,7 +1,7 @@
 """``t2k2-harvest`` entrypoint.
 
 Exit codes: 0 success, 2 configuration or strategy error, 3 Trading212 API error,
-5 one or more sell orders failed.
+5 one or more sell orders couldn't be placed or cancelled.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 
 from .client import Trading212Client, Trading212Error
 from .config import ConfigError, load_settings
-from .harvest import HarvestReport, OrderStatus, run_harvest
+from .harvest import HarvestReport, run_harvest
 from .market import YahooPriceHistory
 from .strategy import StrategyError, load_strategy
 
@@ -68,6 +68,15 @@ def format_report(report: HarvestReport) -> str:
     mode = "EXECUTE" if report.execute else "DRY RUN (pass --execute to place orders)"
     lines = [f"T2-K2 harvest — {mode} — {report.started_at:%Y-%m-%d %H:%M UTC}", ""]
     header = f"{'TICKER':<16}{'ACTION':<9}{'GAIN%':>8}  {'ORDER':<42}  REASON"
+    for c in report.cancellations:
+        placed = "?" if c.order.created_at is None else f"{c.order.created_at:%Y-%m-%d}"
+        error = "" if c.error is None else f" | ERROR: {c.error}"
+        lines.append(
+            f"Expired sell order {c.order.id} for {c.order.ticker} (placed {placed}): "
+            f"{c.status.value}{error}"
+        )
+    if report.cancellations:
+        lines.append("")
     lines += [header, "-" * len(header)]
     for o in report.outcomes:
         d = o.decision
@@ -116,8 +125,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report.to_dict(), indent=2) + "\n", encoding="utf-8")
 
-    failed = any(o.order_status is OrderStatus.FAILED for o in report.outcomes)
-    return EXIT_ORDERS_FAILED if failed else EXIT_OK
+    return EXIT_ORDERS_FAILED if report.failed_orders else EXIT_OK
 
 
 if __name__ == "__main__":  # pragma: no cover
