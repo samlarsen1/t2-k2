@@ -13,6 +13,7 @@ import pytest
 from t2k2.client import (
     LIMIT_ORDER_PATH,
     MARKET_ORDER_PATH,
+    ORDER_PATH,
     ORDERS_PATH,
     POSITIONS_PATH,
     Trading212Client,
@@ -191,3 +192,34 @@ def test_rejects_bad_time_validity() -> None:
     handler, _ = sequence()
     with make_client(handler) as client, pytest.raises(ValueError, match="time_validity"):
         client.place_limit_sell("X_US_EQ", Decimal(1), Decimal(1), "FOREVER")
+
+
+def test_cancel_order_sends_delete_and_accepts_empty_body() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == ORDER_PATH.format(order_id=4501)
+        return httpx.Response(200)
+
+    with make_client(handler) as client:
+        client.cancel_order(4501)
+
+
+def test_cancel_order_retries_timeout() -> None:
+    handler, seen = sequence(httpx.ReadTimeout("slow"), httpx.Response(200))
+    with make_client(handler) as client:
+        client.cancel_order(4501)
+    assert len(seen) == 2
+
+
+def test_cancel_order_already_filled() -> None:
+    handler, _ = sequence(httpx.Response(404, text="Order not found"))
+    with make_client(handler) as client, pytest.raises(Trading212Error, match="404"):
+        client.cancel_order(4501)
+
+
+def test_pending_order_reads_origin_and_age() -> None:
+    handler, _ = sequence(httpx.Response(200, json=[PENDING_SELL]))
+    with make_client(handler) as client:
+        [order] = client.get_pending_orders()
+    assert order.initiated_from == "WEB"
+    assert order.created_at is not None and order.created_at.year == 2026

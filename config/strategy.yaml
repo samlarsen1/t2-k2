@@ -33,11 +33,18 @@ harvest:
   min_order_value: 50.0
   # limit | market
   order_type: limit
-  # Limit price = Trading212 current price x (1 + limit_offset_pct / 100). Negative sells
-  # slightly below the current price to make a fill more likely.
-  limit_offset_pct: -0.25
-  # DAY | GOOD_TILL_CANCEL
-  time_validity: DAY
+  # Limit price = Trading212 current price x (1 + limit_offset_pct / 100). 0 sells at the
+  # current price or better; negative sells slightly below it to make a fill more likely.
+  limit_offset_pct: 0.0
+  # DAY | GOOD_TILL_CANCEL. Trading212 has no expiry-date option, so for a week-long order use
+  # GOOD_TILL_CANCEL with order_expiry_days.
+  time_validity: GOOD_TILL_CANCEL
+  # Each run first cancels T2-K2's own unfilled sell orders (placed through the API, never ones
+  # you placed in the app) once they are this many days old, then re-evaluates those holdings.
+  # Checked only when T2-K2 runs: with a weekly run, a 7-day order is cancelled at the next run.
+  # Orders up to an hour short of the age count as expired, so the same weekday and time catches
+  # them. null never cancels.
+  order_expiry_days: 7
   # Share quantities are rounded down to this many decimal places
   quantity_decimals: 2
 

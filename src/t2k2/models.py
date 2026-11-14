@@ -5,6 +5,7 @@ Unknown attributes are kept (``extra="allow"``) so API additions never break val
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -76,6 +77,9 @@ class Order(_Model):
     side: str | None = None
     quantity: Decimal | None = None
     limit_price: Decimal | None = Field(None, alias="limitPrice")
+    # Where the order came from: API, WEB, IOS, ANDROID, ...
+    initiated_from: str | None = Field(None, alias="initiatedFrom")
+    created_at: datetime | None = Field(None, alias="createdAt")
 
     @model_validator(mode="before")
     @classmethod

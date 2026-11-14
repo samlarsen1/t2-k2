@@ -8,12 +8,20 @@ from decimal import Decimal
 import pytest
 
 from t2k2.client import Trading212Error
-from t2k2.harvest import ORDER_SPACING_SECONDS, HarvestReport, OrderStatus, Outcome, run_harvest
+from t2k2.harvest import (
+    CANCEL_SETTLE_SECONDS,
+    ORDER_SPACING_SECONDS,
+    CancelStatus,
+    HarvestReport,
+    OrderStatus,
+    Outcome,
+    run_harvest,
+)
 from t2k2.market import MarketDataError
 from t2k2.models import Order, Position
-from t2k2.strategy import Action, Strategy
+from t2k2.strategy import Action, HarvestRules, Strategy
 
-from .payloads import PENDING_SELL, POSITIONS, flat_closes, position, rising_closes
+from .payloads import PENDING_SELL, POSITIONS, api_sell, flat_closes, position, rising_closes
 
 
 class FakeBroker:
@@ -22,14 +30,25 @@ class FakeBroker:
         positions: list[dict[str, object]],
         pending: list[dict[str, object]] | None = None,
         reject: set[str] | None = None,
+        cancel_fails: set[int] | None = None,
     ) -> None:
         self.positions = [Position.model_validate(p) for p in positions]
         self.pending = [Order.model_validate(o) for o in pending or []]
         self.reject = reject or set()
+        self.cancel_fails = cancel_fails or set()
         self.placed: list[tuple[str, Decimal, Decimal | None, str | None]] = []
+        self.cancelled: list[int] = []
+        self.calls: list[str] = []
 
     def get_positions(self) -> list[Position]:
+        self.calls.append("positions")
         return self.positions
+
+    def cancel_order(self, order_id: int) -> None:
+        self.calls.append(f"cancel {order_id}")
+        if order_id in self.cancel_fails:
+            raise Trading212Error(404, "Order not found")
+        self.cancelled.append(order_id)
 
     def get_pending_orders(self) -> list[Order]:
         return self.pending
@@ -161,3 +180,77 @@ def test_report_dict_has_order_details() -> None:
     assert rows["NVDA_US_EQ"]["order"]["status"] == "DRY_RUN"
     assert rows["NVDA_US_EQ"]["order"]["limitPrice"] == "159.60"
     assert "order" not in rows["AAPL_US_EQ"]
+
+
+# NOW is Saturday 09:00; a weekly Tuesday 22:00 run is the realistic case, covered below.
+EXPIRING = Strategy(
+    harvest=HarvestRules(time_validity="GOOD_TILL_CANCEL", order_expiry_days=7)
+)
+
+
+def test_expired_api_sell_is_cancelled_then_ticker_re_evaluated() -> None:
+    old = api_sell(7001, "NVDA_US_EQ", "2026-11-06T08:00:00Z")
+    broker = FakeBroker(POSITIONS, pending=[old])
+    sleeps: list[float] = []
+    report = run(broker, FakePrices(PRICES), EXPIRING, execute=True, sleeps=sleeps)
+    assert broker.cancelled == [7001]
+    # Cancel happens before positions are read, so the freed shares count as sellable
+    assert broker.calls[:2] == ["cancel 7001", "positions"]
+    assert CANCEL_SETTLE_SECONDS in sleeps
+    assert report.cancellations[0].status is CancelStatus.CANCELLED
+    assert by_ticker(report)["NVDA_US_EQ"].order_status is OrderStatus.PLACED
+    assert report.to_dict()["cancelledOrders"][0]["status"] == "CANCELLED"
+
+
+def test_weekly_run_at_same_time_catches_last_weeks_order() -> None:
+    # Placed Tuesday 22:00:40; next weekly run starts Tuesday 22:00:05, 35s short of 7 days
+    order = api_sell(7002, "NVDA_US_EQ", "2026-11-10T22:00:40Z")
+    broker = FakeBroker(POSITIONS, pending=[order])
+    run_harvest(
+        broker, FakePrices(PRICES), EXPIRING, execute=True, sleep=lambda _: None,
+        now=lambda: datetime(2026, 11, 17, 22, 0, 5, tzinfo=UTC),
+    )
+    assert broker.cancelled == [7002]
+
+
+def test_fresh_manual_and_inactive_orders_are_left_alone() -> None:
+    pending = [
+        api_sell(7003, "NVDA_US_EQ", "2026-11-12T08:00:00Z"),  # only 2 days old
+        api_sell(7004, "VODl_EQ", "2026-10-01T08:00:00Z", initiated_from="WEB"),  # yours
+        api_sell(7005, "AAPL_US_EQ", "2026-10-01T08:00:00Z", status="CANCELLING"),
+    ]
+    broker = FakeBroker(POSITIONS, pending=pending)
+    report = run(broker, FakePrices(PRICES), EXPIRING, execute=True)
+    assert broker.cancelled == []
+    assert report.cancellations == []
+    outcomes = by_ticker(report)
+    assert "pending sell" in outcomes["NVDA_US_EQ"].decision.reason
+    assert "pending sell" in outcomes["VODl_EQ"].decision.reason
+
+
+def test_no_expiry_configured_never_cancels() -> None:
+    broker = FakeBroker(POSITIONS, pending=[api_sell(7006, "NVDA_US_EQ", "2025-01-01T00:00:00Z")])
+    run(broker, FakePrices(PRICES), Strategy(), execute=True)
+    assert broker.cancelled == []
+
+
+def test_dry_run_reports_cancellation_without_cancelling() -> None:
+    broker = FakeBroker(POSITIONS, pending=[api_sell(7007, "NVDA_US_EQ", "2026-11-01T00:00:00Z")])
+    report = run(broker, FakePrices(PRICES), EXPIRING)
+    assert broker.cancelled == []
+    assert report.cancellations[0].status is CancelStatus.DRY_RUN
+    # Shows the order that would replace it
+    assert by_ticker(report)["NVDA_US_EQ"].order_status is OrderStatus.DRY_RUN
+
+
+def test_failed_cancel_keeps_ticker_skipped_and_counts_as_failure() -> None:
+    broker = FakeBroker(
+        POSITIONS,
+        pending=[api_sell(7008, "NVDA_US_EQ", "2026-11-01T00:00:00Z")],
+        cancel_fails={7008},
+    )
+    report = run(broker, FakePrices(PRICES), EXPIRING, execute=True)
+    assert report.cancellations[0].status is CancelStatus.FAILED
+    assert "pending sell" in by_ticker(report)["NVDA_US_EQ"].decision.reason
+    assert [p[0] for p in broker.placed] == ["VODl_EQ"]
+    assert report.failed_orders == 1

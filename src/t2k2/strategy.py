@@ -71,6 +71,8 @@ class HarvestRules(_Strict):
     order_type: Literal["limit", "market"] = "limit"
     limit_offset_pct: float = Field(-0.25, ge=-10, le=10)
     time_validity: Literal["DAY", "GOOD_TILL_CANCEL"] = "DAY"
+    # Cancel T2-K2's own unfilled sell orders once they are this many days old (None: never)
+    order_expiry_days: int | None = Field(None, ge=1)
     quantity_decimals: int = Field(2, ge=0, le=8)
 
 

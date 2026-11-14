@@ -1,11 +1,15 @@
-"""Orchestrates a run: fetch holdings → evaluate each → place (or just report) sell orders."""
+"""Orchestrates a run.
+
+Pending orders → cancel T2-K2's expired sell orders → holdings → evaluate each → place (or just
+report) sell orders.
+"""
 
 from __future__ import annotations
 
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Protocol
@@ -21,6 +25,15 @@ log = structlog.get_logger(__name__)
 
 # Trading212 allows one order placement per 2 seconds; stay just above it.
 ORDER_SPACING_SECONDS = 2.5
+# Spacing between cancellations, and a pause after them so Trading212 releases the shares the
+# cancelled orders reserved before positions are fetched.
+CANCEL_SPACING_SECONDS = 1.5
+CANCEL_SETTLE_SECONDS = 5.0
+# Orders this close to the expiry age count as expired, so a run on the same weekday and time
+# as the one that placed an order catches it a week later despite small timing differences.
+EXPIRY_GRACE = timedelta(hours=1)
+# Order statuses that are no longer live, so there's nothing to cancel.
+INACTIVE_ORDER_STATUSES = frozenset({"FILLED", "CANCELLED", "CANCELLING", "REJECTED", "REPLACED"})
 
 
 class Broker(Protocol):
@@ -35,6 +48,8 @@ class Broker(Protocol):
     ) -> Order: ...
 
     def place_market_sell(self, ticker: str, quantity: Decimal) -> Order: ...
+
+    def cancel_order(self, order_id: int) -> None: ...
 
 
 class OrderStatus(StrEnum):
@@ -56,6 +71,23 @@ class Outcome:
     error: str | None = None
 
 
+class CancelStatus(StrEnum):
+    """What happened to an expired sell order."""
+
+    DRY_RUN = "DRY_RUN"
+    CANCELLED = "CANCELLED"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True)
+class Cancellation:
+    """An expired sell order and what happened when cancelling it."""
+
+    order: Order
+    status: CancelStatus
+    error: str | None = None
+
+
 @dataclass
 class HarvestReport:
     """Everything a run decided and did."""
@@ -63,11 +95,14 @@ class HarvestReport:
     started_at: datetime
     execute: bool
     outcomes: list[Outcome] = field(default_factory=list)
+    cancellations: list[Cancellation] = field(default_factory=list)
 
     @property
     def failed_orders(self) -> int:
-        """Number of orders Trading212 rejected or that couldn't be sent."""
-        return sum(o.order_status is OrderStatus.FAILED for o in self.outcomes)
+        """Orders that couldn't be placed or cancelled."""
+        return sum(o.order_status is OrderStatus.FAILED for o in self.outcomes) + sum(
+            c.status is CancelStatus.FAILED for c in self.cancellations
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serialisable form of the report."""
@@ -105,6 +140,18 @@ class HarvestReport:
         return {
             "startedAt": self.started_at.isoformat(),
             "execute": self.execute,
+            "cancelledOrders": [
+                {
+                    "ticker": c.order.ticker,
+                    "id": c.order.id,
+                    "createdAt": None
+                    if c.order.created_at is None
+                    else c.order.created_at.isoformat(),
+                    "status": c.status.value,
+                    "error": c.error,
+                }
+                for c in self.cancellations
+            ],
             "decisions": rows,
         }
 
@@ -135,8 +182,23 @@ def run_harvest(
         Trading212Error: If positions or pending orders can't be fetched.
     """
     report = HarvestReport(started_at=now(), execute=execute)
+    pending = broker.get_pending_orders()
+
+    expiry_days = strategy.harvest.order_expiry_days
+    if expiry_days is not None:
+        cutoff = report.started_at - timedelta(days=expiry_days) + EXPIRY_GRACE
+        report.cancellations = _cancel_expired(broker, pending, cutoff, execute, sleep)
+    # A dry run treats would-be cancellations as done, so it shows the orders that would replace
+    # them. Failed cancellations keep their ticker skipped: the old order may still be live.
+    cancelled_ids = {
+        c.order.id for c in report.cancellations if c.status is not CancelStatus.FAILED
+    }
+    pending_sells = {o.ticker for o in pending if o.is_sell and o.id not in cancelled_ids}
+    if execute and cancelled_ids:
+        sleep(CANCEL_SETTLE_SECONDS)
+
+    # Fetched after cancelling so shares the cancelled orders reserved count as sellable.
     positions = broker.get_positions()
-    pending_sells = {o.ticker for o in broker.get_pending_orders() if o.is_sell}
     log.info("harvest_start", positions=len(positions), pending_sells=len(pending_sells),
              execute=execute)
 
@@ -172,6 +234,59 @@ def run_harvest(
         deferred=len(deferred),
     )
     return report
+
+
+def find_expired_sells(orders: list[Order], cutoff: datetime) -> list[Order]:
+    """Return T2-K2's live sell orders created before ``cutoff``.
+
+    Only API-placed limit sells are considered, so orders placed in the app are never touched.
+
+    Args:
+        orders: Pending orders from Trading212.
+        cutoff: Orders created before this time have expired (timezone-aware).
+
+    Returns:
+        The expired orders.
+    """
+    return [
+        o
+        for o in orders
+        if o.is_sell
+        and (o.type or "").upper() == "LIMIT"
+        and o.initiated_from == "API"
+        and (o.status or "").upper() not in INACTIVE_ORDER_STATUSES
+        and o.id is not None
+        and o.created_at is not None
+        and o.created_at < cutoff
+    ]
+
+
+def _cancel_expired(
+    broker: Broker,
+    pending: list[Order],
+    cutoff: datetime,
+    execute: bool,
+    sleep: Callable[[float], None],
+) -> list[Cancellation]:
+    results: list[Cancellation] = []
+    for i, order in enumerate(find_expired_sells(pending, cutoff)):
+        assert order.id is not None  # nosec B101 - guaranteed by find_expired_sells
+        if not execute:
+            log.info("expired_order_dry_run", ticker=order.ticker, order_id=order.id)
+            results.append(Cancellation(order, CancelStatus.DRY_RUN))
+            continue
+        if i:
+            sleep(CANCEL_SPACING_SECONDS)
+        try:
+            broker.cancel_order(order.id)
+        except Trading212Error as exc:
+            log.error("expired_order_cancel_failed", ticker=order.ticker, order_id=order.id,
+                      error=str(exc))
+            results.append(Cancellation(order, CancelStatus.FAILED, str(exc)))
+            continue
+        log.info("expired_order_cancelled", ticker=order.ticker, order_id=order.id)
+        results.append(Cancellation(order, CancelStatus.CANCELLED))
+    return results
 
 
 def _decide(

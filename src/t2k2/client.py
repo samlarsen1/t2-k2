@@ -2,9 +2,10 @@
 
 API reference: https://docs.trading212.com/api
 
-Retry policy: GET requests retry timeouts, network errors, 429 and 5xx. Order placement only
-retries HTTP 429, where Trading212 rejected the request before acting on it. A timed-out or
-failed POST is never retried, because the order may already exist and a retry could sell twice.
+Retry policy: GET and DELETE (cancel) requests retry timeouts, network errors, 429 and 5xx.
+Order placement only retries HTTP 429, where Trading212 rejected the request before acting on it.
+A timed-out or failed POST is never retried, because the order may already exist and a retry
+could sell twice.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ log = structlog.get_logger(__name__)
 
 POSITIONS_PATH = "/api/v0/equity/positions"
 ORDERS_PATH = "/api/v0/equity/orders"
+ORDER_PATH = "/api/v0/equity/orders/{order_id}"
 LIMIT_ORDER_PATH = "/api/v0/equity/orders/limit"
 MARKET_ORDER_PATH = "/api/v0/equity/orders/market"
 
@@ -132,7 +134,8 @@ class Trading212Client:
     # ------------------------------------------------------------------ transport
 
     def _send_once(self, method: str, path: str, payload: dict[str, Any] | None) -> Any:
-        idempotent = method == "GET"
+        # Cancelling twice is harmless, so DELETE retries like GET; order POSTs never do.
+        idempotent = method in ("GET", "DELETE")
         try:
             response = self._client.request(method, path, json=payload)
         except httpx.TimeoutException as exc:
@@ -154,6 +157,8 @@ class Trading212Client:
         if not response.is_success:
             # Trading212 error bodies are short codes such as "InsufficientResources".
             raise Trading212Error(response.status_code, response.text[:200] or "no body")
+        if not response.content:
+            return None
         try:
             return response.json()
         except ValueError as exc:
@@ -224,6 +229,19 @@ class Trading212Client:
                                   "errors)") from exc
 
     # ------------------------------------------------------------------ orders
+
+    def cancel_order(self, order_id: int) -> None:
+        """Cancel a pending order.
+
+        Args:
+            order_id: Trading212 order id.
+
+        Raises:
+            Trading212Error: If Trading212 rejects the cancellation (e.g. the order already
+                filled) or can't be reached.
+        """
+        log.info("t212_cancel_order", order_id=order_id)
+        self._request("DELETE", ORDER_PATH.format(order_id=order_id))
 
     def place_limit_sell(
         self,
