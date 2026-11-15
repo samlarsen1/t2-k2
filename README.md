@@ -6,6 +6,23 @@ rules, and trims the overbought winners to lock in part of their gains.
 Sibling of [T2-D2](https://github.com/samlarsen1/t2-d2), which buys dips. T2-K2 is the sell side,
 with the same guardrails. **Dry run by default**: nothing is sold unless you pass `--execute`.
 
+## Part of the T2 system
+
+This repo is one of the T2 droids, coordinated from
+[t2-hq](https://github.com/samlarsen1/t2-hq), which holds the system
+[architecture](https://github.com/samlarsen1/t2-hq/blob/main/ARCHITECTURE.md) and
+[plan](https://github.com/samlarsen1/t2-hq/blob/main/PLAN.md).
+
+| Repo | Role |
+|---|---|
+| [t2-d2](https://github.com/samlarsen1/t2-d2) | buys dips; places buy orders on its own timers |
+| **t2-k2** (this repo) | harvests gains from overbought holdings; places sell orders |
+| [t2-bb8](https://github.com/samlarsen1/t2-bb8) | harvests the Trading212 instrument list; metadata only |
+| [t2-3po](https://github.com/samlarsen1/t2-3po) | advisory council; reviews theses, strategy and configuration; read-only |
+| [t2-hq](https://github.com/samlarsen1/t2-hq) | hub: plan, architecture, and the orchestrator and Telegram interface (planned) |
+
+T2-K2 is the sell side of the execution layer. It trades by the rules in `config/strategy.yaml`, with no LLM and no approval step in the order path. `t2-3po` reads that file to suggest changes; a suggestion only takes effect as a reviewed change to it. It runs on its own and doesn't need the other repos to be running.
+
 ---
 
 ## How it works
