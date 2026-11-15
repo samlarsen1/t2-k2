@@ -1,0 +1,12 @@
+# Installed by t2-hq's bin/t2-deploy.
+[Unit]
+Description=T2-K2 weekly gain harvest (Tuesday 22:00 UK)
+
+[Timer]
+OnCalendar=Tue 22:00 Europe/London
+AccuracySec=1s
+# A run missed while the machine was off is skipped, not fired late on stale prices.
+Persistent=false
+
+[Install]
+WantedBy=timers.target
