@@ -1,0 +1,19 @@
+# Installed by t2-hq's bin/t2-deploy, which replaces @APP_DIR@ with the deployed app directory.
+#
+# Dry run by default. To place sell orders, add a drop-in, which survives redeploys:
+#   systemctl --user edit t2k2.service
+#   [Service]
+#   Environment=T2K2_ARGS=--execute
+[Unit]
+Description=T2-K2 weekly gain harvest
+Wants=network-online.target
+After=network-online.target time-sync.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@APP_DIR@
+Environment=T2K2_ARGS=
+ExecStart=@APP_DIR@/.venv/bin/t2k2-harvest $T2K2_ARGS
+# Exit code 3 means skipped (a lock is held), which is not a failure.
+SuccessExitStatus=3
+TimeoutStartSec=20min

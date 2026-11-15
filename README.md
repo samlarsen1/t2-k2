@@ -81,13 +81,15 @@ retry could sell twice. Re-running is safe: tickers with a pending sell are skip
 t2-k2/
 ├── config/strategy.yaml  # overbought + harvesting rules (edit this)
 ├── src/t2k2/
-│   ├── cli.py            # `t2k2-harvest` entrypoint, table/JSON output, exit codes
+│   ├── cli.py            # `t2k2-harvest` entrypoint: table output, locks, run report, exit codes
 │   ├── config.py         # env var settings (T212_*, T2K2_*)
 │   ├── client.py         # Trading212 client: positions, pending orders, sell orders
 │   ├── models.py         # pydantic models (extra attributes kept)
 │   ├── market.py         # Yahoo Finance closes, T212→Yahoo symbols, RSI/SMA/% change
 │   ├── strategy.py       # strategy file validation, overbought signals, order sizing (pure)
-│   └── harvest.py        # orchestration: fetch → evaluate → dry run / place
+│   ├── harvest.py        # orchestration: fetch → evaluate → dry run / place
+│   └── t2contract.py     # vendored from t2-hq: run reports, exit codes, locks
+├── deploy/systemd/       # unit templates installed by t2-hq's bin/t2-deploy
 └── tests/                # mocked-API tests
 ```
 
@@ -107,13 +109,13 @@ t2-k2/
 # Install
 uv sync
 
-# Copy and fill in secrets (or symlink the same .env T2-D2 uses)
+# Copy and fill in secrets
 cp .env.example .env
 
 # Dry run: show what would be sold
 uv run t2k2-harvest
 
-# Dry run and save the full report (indicators, signals, orders) as JSON
+# Dry run, writing the run report (indicators, signals, orders) to a chosen file
 uv run t2k2-harvest --report reports/harvest.json
 
 # Use another strategy file
@@ -134,8 +136,26 @@ NVDA_US_EQ      HARVEST    60.00  sell 1.87 @159.60 ~239.36 DRY_RUN overbought: 
 AAPL_US_EQ      HOLD        5.00                                    gain 5.00% below min_gain_pct 25%
 ```
 
-Exit codes: `0` success, `2` configuration or strategy file error, `3` Trading212 API error,
-`5` one or more sell orders couldn't be placed or cancelled.
+### Run reports, exit codes and locks
+
+T2-K2 follows the T2 droid contract (t2-hq `CONTRACT.md`):
+
+- **Run report.** Every run writes a JSON report to `var/runs/<UTC timestamp>-<command>.json`
+  (or `$T2_RUNS_DIR`). It records the version, command, start and end time, dry-run flag, status,
+  exit code, a one-line summary and errors. Its `result` holds every holding's decision, indicators and order, and any cancelled orders. A sell order that couldn't be placed or cancelled makes the run `failed`. `--report PATH` writes it somewhere else.
+- **Exit codes:** `0` success, `1` the run failed, `2` configuration or usage error, `3` skipped
+  (a lock is held).
+- **One run at a time.** A second run while one is in progress exits `3` at once.
+- **The Trading212 account is shared.** Before calling Trading212 a run waits for the account lock,
+  which every droid takes, so droids on independent timers don't trip the per-account rate limits.
+  If it is still held after 10 minutes (`T2_T212_LOCK_TIMEOUT`, in seconds), the run exits `3`.
+
+Locks live in `/run/user/<uid>/t2` (or `$T2_LOCK_DIR`).
+
+```bash
+uv run t2k2-harvest
+ls var/runs/
+```
 
 ### Scheduling (weekly, Tuesday 22:00 UK)
 
@@ -144,61 +164,9 @@ markets (21:00 UK, or 20:00 in the weeks when only one side has changed clocks) 
 the day's prices have settled, so the signals use Tuesday's final closes. Orders queue for
 Wednesday's open.
 
-Smoke-test by hand first (and ideally `--execute` once against the demo account):
-
-```bash
-uv run t2k2-harvest
-```
-
-Install the systemd service and timer. Paste this from the repo directory; `$USER` and `$PWD`
-are filled in as you paste:
-
-```bash
-sudo tee /etc/systemd/system/t2k2-harvest.service >/dev/null <<UNIT
-[Unit]
-Description=T2-K2 weekly gain harvest
-Wants=network-online.target
-After=network-online.target time-sync.target
-
-[Service]
-Type=oneshot
-User=$USER
-WorkingDirectory=$PWD
-ExecStart=$PWD/.venv/bin/t2k2-harvest --execute --report reports/latest.json
-TimeoutStartSec=15min
-UNIT
-
-sudo tee /etc/systemd/system/t2k2-harvest.timer >/dev/null <<UNIT
-[Unit]
-Description=T2-K2 weekly gain harvest (Tuesday 22:00 UK)
-
-[Timer]
-OnCalendar=Tue 22:00 Europe/London
-Unit=t2k2-harvest.service
-AccuracySec=1s
-Persistent=false
-
-[Install]
-WantedBy=timers.target
-UNIT
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now t2k2-harvest.timer
-```
-
-`Persistent=false` skips a run missed while the machine was off, rather than firing it late.
-Check and inspect:
-
-```bash
-systemctl list-timers t2k2-harvest.timer      # next run
-journalctl -u t2k2-harvest.service -n 100     # last run's output
-cat reports/latest.json                       # last run's full report
-sudo systemctl start t2k2-harvest.service     # run now
-```
-
-To change the time, edit `OnCalendar` (check it with
-`systemd-analyze calendar "Tue 22:00 Europe/London"`), then run `sudo systemctl daemon-reload`.
-To stop it: `sudo systemctl disable --now t2k2-harvest.timer`.
+The timer is installed by the deploy (see [Deployment](#deployment)). A run missed while the
+machine was off is skipped rather than fired late (`Persistent=false`). Smoke-test by hand first,
+ideally with `--execute` once against the demo account.
 
 ### Strategy
 
@@ -253,6 +221,42 @@ Commit on `feature/<name>`, `bug/<name>`, `task/<name>` or `hotfix/<name>` branc
 
 ---
 
+## Deployment
+
+t2-k2 is deployed with t2-hq's `bin/t2-deploy`, which checks out a release tag in
+`$T2_APPS/t2-k2`, builds its virtual environment and installs the systemd user units in
+`deploy/systemd/`:
+
+```bash
+# From the t2-hq checkout
+bin/t2-deploy release t2-k2 v0.2.0   # tag a clean, tested main and push the tag
+bin/t2-deploy deploy t2-k2           # deploy the newest tag
+bin/t2-deploy status
+```
+
+The units run `t2k2-harvest` every Tuesday at 22:00 UK time (`t2k2.timer`). **The deployed unit
+is a dry run.** To let it place sell orders, add a drop-in, which survives redeploys:
+
+```bash
+systemctl --user edit t2k2.service
+# add:
+#   [Service]
+#   Environment=T2K2_ARGS=--execute
+systemctl --user cat t2k2.service     # check the override
+```
+
+Inspect runs:
+
+```bash
+systemctl --user list-timers t2k2.timer          # next run
+journalctl --user -u t2k2.service -n 100         # last run's output
+ls $T2_APPS/t2-k2/var/runs/                      # run reports
+systemctl --user start t2k2.service              # run now
+```
+
+The deploy never creates, reads or edits `.env`: write `$T2_APPS/t2-k2/.env` from `.env.example`
+first, or the deploy stops before enabling anything.
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |
@@ -261,6 +265,9 @@ Commit on `feature/<name>`, `bug/<name>`, `task/<name>` or `hotfix/<name>` branc
 | `T212_API_SECRET` | yes | — | Trading212 API secret |
 | `T212_BASE_URL` | no | `https://live.trading212.com` | `https://demo.trading212.com` for the demo account; no other hosts are allowed |
 | `T2K2_STRATEGY_FILE` | no | `config/strategy.yaml` | Strategy file; `--strategy` overrides it |
+| `T2_RUNS_DIR` | no | `var/runs` | Where run reports go |
+| `T2_LOCK_DIR` | no | `/run/user/<uid>/t2` | Where the run and Trading212 locks live |
+| `T2_T212_LOCK_TIMEOUT` | no | `600` | Seconds to wait for the shared Trading212 lock before skipping |
 | `LOG_LEVEL` | no | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
 ---

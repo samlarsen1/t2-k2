@@ -39,3 +39,6 @@ logs/
 
 # Harvest reports (may contain position sizes)
 reports/
+
+# Run reports, data and caches written by deployed runs
+var/

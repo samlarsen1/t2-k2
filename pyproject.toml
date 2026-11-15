@@ -1,6 +1,6 @@
 [project]
 name = "t2k2"
-version = "0.1.0"
+version = "0.2.0"
 description = "Gain-harvesting droid: trims overbought Trading212 holdings to lock in profits"
 readme = "README.md"
 requires-python = ">=3.12"
