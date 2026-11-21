@@ -11,7 +11,7 @@ Repos sit side by side in one development directory (`$T2_SRC`) and one apps dir
 - `../t2-d2`: buys dips; places buy orders on its own timers
 - `../t2-bb8`: harvests the Trading212 instrument list; metadata only
 - `../t2-3po`: advisory council; reviews theses, strategy and configuration; read-only
-- `../t2-hq`: hub; plan, architecture, orchestrator and Telegram interface (planned)
+- `../t2-hq`: hub; plan, architecture, orchestrator and Telegram interface
 
 T2-K2 is the sell side of the execution layer. It trades by the rules in `config/strategy.yaml`, with no LLM and no approval step in the order path. `t2-3po` reads that file to suggest changes; a suggestion only takes effect as a reviewed change to it.
 This repo must keep working standalone: never import a sibling repo's code. Changes to the
