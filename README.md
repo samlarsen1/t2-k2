@@ -18,7 +18,7 @@ GitHub owner as this one.
 | **t2-k2** (this repo) | harvests gains from overbought holdings; places sell orders |
 | `t2-bb8` | harvests the Trading212 instrument list; metadata only |
 | `t2-3po` | advisory council; reviews theses, strategy and configuration; read-only |
-| `t2-hq` | hub: plan, architecture, and the orchestrator and Telegram interface (planned) |
+| `t2-hq` | hub: plan, architecture, and the orchestrator and Telegram interface |
 
 T2-K2 is the sell side of the execution layer. It trades by the rules in `config/strategy.yaml`, with no LLM and no approval step in the order path. `t2-3po` reads that file to suggest changes; a suggestion only takes effect as a reviewed change to it. It runs on its own and doesn't need the other repos to be running.
 
